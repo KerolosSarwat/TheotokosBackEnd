@@ -1,0 +1,3 @@
+@echo off
+echo Starting installing node modules...
+start cmd /k "npm install"
