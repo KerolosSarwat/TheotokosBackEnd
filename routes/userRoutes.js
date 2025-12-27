@@ -8,6 +8,9 @@ router.get('/', userController.getAllUsers);
 //Get the pendding users
 router.get('/pendding', userController.getpenddingUsers);
 
+
+router.get('/attendance-report', userController.getUsersAttendance);
+
 // Get user by code
 router.get('/:code', userController.getUserByCode);
 

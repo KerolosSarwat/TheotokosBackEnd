@@ -53,6 +53,81 @@ const getUserByCode = async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
 };
+// Get combined data: users with their attendance
+const getUsersAttendance = async (req, res) => {
+  try {
+    const { level } = req.query;
+    
+    // const [usersResponse, attendanceResponse] = await Promise.all([
+    //   axios.get(`${FIREBASE_URL}/users.json`),
+    //   axios.get(`${FIREBASE_URL}/attendance.json`)
+    // ]);
+    
+    const users = (await db.ref('users').once("value")).val();
+    const attendance = (await db.ref('attendance').once("value")).val();
+        // Handle case where no data exists
+    if (!users) {
+      return res.json([]);
+    }
+    
+    let usersArray = Object.keys(users).map(key => {
+      // Create a clean user object without circular references
+      return {
+        id: key,
+        code: users[key].code,
+        fullName: users[key].fullName,
+        level: users[key].level,
+        church: users[key].church,
+        birthdate: users[key].birthdate,
+        gender: users[key].gender,
+        address: users[key].address,
+        phoneNumber: users[key].phoneNumber
+      };
+    });
+    
+    // Filter by level if provided
+    if (level && level !== 'all') {
+      usersArray = usersArray.filter(user => user.level === level);
+    }
+    
+    // Combine users with their attendance data
+    const report = usersArray.map(user => {
+      let studentAttendance = [];
+      
+      if (attendance && attendance[user.code]) {
+        // Create clean attendance objects
+        studentAttendance = Object.keys(attendance[user.code]).map(key => {
+          const record = attendance[user.code][key];
+          return {
+            id: key,
+            dateTime: record.dateTime,
+            status: record.status,
+            studentId: record.studentId
+          };
+        });
+        
+        // Sort attendance by date (newest first)
+        studentAttendance.sort((a, b) => new Date(b.dateTime) - new Date(a.dateTime));
+      }
+      
+      // Return clean user object with attendance
+      return {
+        ...user,
+        attendance: studentAttendance
+      };
+    });
+    
+    console.log(`Generated report for ${report.length} students`);
+    res.json(report);
+    
+  } catch (error) {
+    console.error('Error generating report:', error.message);
+    res.status(500).json({ 
+      error: 'Failed to generate report',
+      details: error.message 
+    });
+  }
+};
 
 // Create new user
 const createUser = async (req, res) => {
@@ -102,8 +177,9 @@ const updateUser = async (req, res) => {
             continue;
           }
           console.log(user.code);
-          const userRef = db.ref(`penddingUsers/${user.code}`);
+          const userRef = db.ref(`users/${user.code}`);
           const snapshot = await userRef.once('value');
+          console.log(user.code);
           
           if (!snapshot.exists()) {
             results.failed.push({ user, error: 'User not found' });
@@ -201,6 +277,7 @@ module.exports = {
   getAllUsers,
   getpenddingUsers,
   getUserByCode,
+  getUsersAttendance,
   createUser,
   updateUser,
   deleteUser,
