@@ -1,32 +1,52 @@
 const express = require('express');
 const router = express.Router();
-const userController = require('../controllers/userController');
+const {
+    getAllUsers,
+    getpenddingUsers,
+    getUserByCode,
+    createUser,
+    updateUser,
+    deleteUser,
+    getUsersAttendance,
+    sendNotification,
+    approveUser,
+    syncPortalUser,
+    getPortalUsers,
+    updatePortalUser
+} = require('../controllers/userController');
+const { verifyToken, checkPermission } = require('../middleware/authMiddleware');
 
 // Get all users
-router.get('/', userController.getAllUsers);
+router.get('/', getAllUsers);
 
-//Get the pendding users
-router.get('/pendding', userController.getpenddingUsers);
+// Get pending users
+router.get('/pendding', getpenddingUsers);
 
-
-router.get('/attendance-report', userController.getUsersAttendance);
+// Get attendance report
+router.get('/attendance-report', getUsersAttendance);
 
 // Get user by code
-router.get('/:code', userController.getUserByCode);
+router.get('/:code', getUserByCode);
 
 // Create new user
-router.post('/', userController.createUser);
+router.post('/', verifyToken, checkPermission('users', 'edit'), createUser);
 
-// Update user
-router.put('/:code', userController.updateUser);
+// Update user (Single and Bulk)
+router.put('/:code', verifyToken, checkPermission('users', 'edit'), updateUser);
+router.post('/bulk-update', verifyToken, checkPermission('users', 'edit'), updateUser);
 
-router.post('/bulk-update', userController.updateUser);
-
-// router.put('/:code', userController.updateUser);
 // Delete user
-router.delete('/:code', userController.deleteUser);
+router.delete('/:code', verifyToken, checkPermission('users', 'delete'), deleteUser);
 
 // Send Notifications
-router.post('/send-notification', userController.sendNotification)
+router.post('/send-notification', sendNotification);
+
+// Approve User
+router.post('/approve/:code', verifyToken, checkPermission('users', 'edit'), approveUser);
+
+// Portal User Management
+router.post('/portal/sync', syncPortalUser);
+router.get('/portal/users', getPortalUsers);
+router.put('/portal/users/:uid', updatePortalUser);
 
 module.exports = router;
