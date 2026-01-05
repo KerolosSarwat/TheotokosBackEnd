@@ -5,6 +5,20 @@ const dotenv = require('dotenv');
 // Load environment variables
 dotenv.config();
 
+// Validate required environment variables
+const requiredEnv = [
+  'FIREBASE_TYPE',
+  'FIREBASE_PROJECT_ID', 
+  'FIREBASE_PRIVATE_KEY',
+  'FIREBASE_CLIENT_EMAIL'
+];
+
+const missingEnv = requiredEnv.filter(key => !process.env[key]);
+if (missingEnv.length > 0) {
+  console.error(`ERROR: Missing required environment variables: ${missingEnv.join(', ')}`);
+  process.exit(1);
+}
+
 // Import routes
 const userRoutes = require('./routes/userRoutes');
 const firestoreRoutes = require('./routes/firestoreRoutes');

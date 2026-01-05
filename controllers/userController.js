@@ -5,9 +5,9 @@ const { db, admin } = require('../config/firebase-config');
 const getAllUsers = async (req, res) => {
   try {
     const usersRef = db.ref('users');
+  
     const snapshot = await usersRef.once('value');
     const users = snapshot.val();
-
     if (!users) {
       return res.status(404).json({ message: 'No users found' });
     }
