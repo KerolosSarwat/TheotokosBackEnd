@@ -5,13 +5,12 @@ const { db, admin } = require('../config/firebase-config');
 const getAllUsers = async (req, res) => {
   try {
     const usersRef = db.ref('users');
-  
+
     const snapshot = await usersRef.once('value');
     const users = snapshot.val();
     if (!users) {
       return res.status(404).json({ message: 'No users found' });
     }
-
     return res.status(200).json(users);
   } catch (error) {
     console.error('Error getting users:', error);
@@ -39,7 +38,15 @@ const getpenddingUsers = async (req, res) => {
 const getUserByCode = async (req, res) => {
   try {
     const { code } = req.params;
-    const userRef = db.ref(`users/${code}`);
+    const { type } = req.query; // Check for type=pending
+
+    let userRef;
+    if (type === 'pending') {
+      userRef = db.ref(`penddingUsers/${code}`);
+    } else {
+      userRef = db.ref(`users/${code}`);
+    }
+
     const snapshot = await userRef.once('value');
     const user = snapshot.val();
 
@@ -100,14 +107,14 @@ const getUsersAttendance = async (req, res) => {
           const record = attendance[user.code][key];
           return {
             id: key,
-            dateTime: record.dateTime,
+            date: record.date,
             status: record.status,
-            studentId: record.studentId
+            term: record.term
           };
         });
 
         // Sort attendance by date (newest first)
-        studentAttendance.sort((a, b) => new Date(b.dateTime) - new Date(a.dateTime));
+        studentAttendance.sort((a, b) => new Date(b.date) - new Date(a.date));
       }
 
       // Return clean user object with attendance
@@ -161,10 +168,16 @@ const createUser = async (req, res) => {
 const updateUser = async (req, res) => {
   try {
     const { code } = req.params;
+    const { type } = req.query; // Check for type=pending
     const userData = req.body;
 
     // BULK UPDATE: If userData is an array
     if (Array.isArray(userData)) {
+      // ... (existing bulk update logic remains same, assuming it's for regular users mainly)
+      // If needed for pending, logic would be similar but target different node.
+      // For now, let's keep bulk update as is or update if necessary.
+      // Assuming bulk update is for main list import.
+
       const results = {
         successful: [],
         failed: []
@@ -205,8 +218,14 @@ const updateUser = async (req, res) => {
       });
     }
 
-    // SINGLE UPDATE: Original logic
-    const userRef = db.ref(`users/${code}`);
+    // SINGLE UPDATE: Modified logic
+    let userRef;
+    if (type === 'pending') {
+      userRef = db.ref(`penddingUsers/${code}`);
+    } else {
+      userRef = db.ref(`users/${code}`);
+    }
+
     const snapshot = await userRef.once('value');
 
     if (!snapshot.exists()) {
@@ -246,6 +265,29 @@ const deleteUser = async (req, res) => {
     return res.status(200).json({ message: 'User deleted successfully' });
   } catch (error) {
     console.error('Error deleting user:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// Delete pending user
+const deletePenddingUser = async (req, res) => {
+  try {
+    const { code } = req.params;
+
+    // Check if user exists in penddingUsers
+    const userRef = db.ref(`penddingUsers/${code}`);
+    const snapshot = await userRef.once('value');
+
+    if (!snapshot.exists()) {
+      return res.status(404).json({ message: 'Pending user not found' });
+    }
+
+    // Delete user
+    await userRef.remove();
+
+    return res.status(200).json({ message: 'Pending user deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting pending user:', error);
     return res.status(500).json({ error: error.message });
   }
 };
@@ -414,6 +456,7 @@ module.exports = {
   createUser,
   updateUser,
   deleteUser,
+  deletePenddingUser,
   sendNotification,
   approveUser,
   syncPortalUser,
