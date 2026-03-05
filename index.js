@@ -8,7 +8,7 @@ dotenv.config();
 // Validate required environment variables
 const requiredEnv = [
   'FIREBASE_TYPE',
-  'FIREBASE_PROJECT_ID', 
+  'FIREBASE_PROJECT_ID',
   'FIREBASE_PRIVATE_KEY',
   'FIREBASE_CLIENT_EMAIL'
 ];
@@ -22,6 +22,7 @@ if (missingEnv.length > 0) {
 // Import routes
 const userRoutes = require('./routes/userRoutes');
 const firestoreRoutes = require('./routes/firestoreRoutes');
+const configRoutes = require('./routes/configRoutes');
 
 // Initialize express app
 const app = express();
@@ -34,6 +35,7 @@ app.use(express.urlencoded({ extended: true }));
 // Routes
 app.use('/api/users', userRoutes);
 app.use('/api/firestore', firestoreRoutes);
+app.use('/api/config', configRoutes);
 
 // Root route
 app.get('/', (req, res) => {
