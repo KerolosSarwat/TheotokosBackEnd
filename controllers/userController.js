@@ -1,5 +1,5 @@
 // const { use } = require('react');
-const { db, admin } = require('../config/firebase-config');
+const { db, admin, auth } = require('../config/firebase-config');
 
 // Get all users
 const getAllUsers = async (req, res) => {
@@ -448,6 +448,101 @@ const updatePortalUser = async (req, res) => {
   }
 };
 
+// Reset Password via Phone OTP
+const resetPasswordByPhone = async (req, res) => {
+  try {
+    const { idToken, newPassword } = req.body;
+
+    if (!idToken || !newPassword) {
+      return res.status(400).json({ message: 'ID token and new password are required' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters long' });
+    }
+
+    // Verify the ID token from phone authentication
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+    const phone = decodedToken.phone_number;
+
+    if (!phone) {
+      return res.status(400).json({ message: 'Token does not contain a phone number' });
+    }
+
+    // Find the portal user associated with this phone number
+    // First, check if this phone-auth UID is linked to a portal user
+    const portalUserRef = db.ref('portalUsers');
+    const snapshot = await portalUserRef.once('value');
+    const portalUsers = snapshot.val();
+
+    let targetUid = null;
+
+    if (portalUsers) {
+      // Look for a portal user with a matching phone number or the same UID
+      for (const [pUid, pUser] of Object.entries(portalUsers)) {
+        if (pUid === uid || pUser.phoneNumber === phone) {
+          targetUid = pUid;
+          break;
+        }
+      }
+    }
+
+    // If no portal user found, try to find Firebase Auth user by phone
+    if (!targetUid) {
+      try {
+        const userByPhone = await admin.auth().getUserByPhoneNumber(phone);
+        targetUid = userByPhone.uid;
+      } catch (e) {
+        // No user found with this phone number
+      }
+    }
+
+    if (!targetUid) {
+      return res.status(404).json({ message: 'No account found linked to this phone number' });
+    }
+
+    // Update the password for the target user
+    await admin.auth().updateUser(targetUid, { password: newPassword });
+
+    return res.status(200).json({ message: 'Password reset successfully' });
+  } catch (error) {
+    console.error('Error resetting password by phone:', error);
+    if (error.code === 'auth/id-token-expired') {
+      return res.status(401).json({ message: 'Verification expired. Please try again.' });
+    }
+    return res.status(500).json({ message: 'Failed to reset password', error: error.message });
+  }
+};
+
+// Admin Reset Staff Password
+const adminResetPassword = async (req, res) => {
+  try {
+    const { targetUid, newPassword } = req.body;
+
+    if (!targetUid || !newPassword) {
+      return res.status(400).json({ message: 'Target UID and new password are required' });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters long' });
+    }
+
+    // The caller's identity is already verified by verifyToken middleware
+    // and permission checked by checkPermission middleware
+    // Just update the target user's password
+    await admin.auth().updateUser(targetUid, { password: newPassword });
+
+    return res.status(200).json({ message: 'Password reset successfully' });
+  } catch (error) {
+    console.error('Error resetting staff password:', error);
+    if (error.code === 'auth/user-not-found') {
+      return res.status(404).json({ message: 'User not found in Firebase Auth' });
+    }
+    return res.status(500).json({ message: 'Failed to reset password', error: error.message });
+  }
+};
+
 module.exports = {
   getAllUsers,
   getpenddingUsers,
@@ -461,5 +556,7 @@ module.exports = {
   approveUser,
   syncPortalUser,
   getPortalUsers,
-  updatePortalUser
+  updatePortalUser,
+  resetPasswordByPhone,
+  adminResetPassword
 };

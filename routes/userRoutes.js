@@ -13,7 +13,9 @@ const {
     approveUser,
     syncPortalUser,
     getPortalUsers,
-    updatePortalUser
+    updatePortalUser,
+    resetPasswordByPhone,
+    adminResetPassword
 } = require('../controllers/userController');
 const { verifyToken, checkPermission } = require('../middleware/authMiddleware');
 
@@ -56,5 +58,11 @@ router.post('/send-notification', sendNotification);
 
 // Portal User Management
 router.post('/portal/sync', syncPortalUser);
+
+// Reset Password via Phone OTP
+router.post('/portal/reset-password-phone', resetPasswordByPhone);
+
+// Admin Reset Staff Password (requires auth)
+router.post('/portal/admin-reset-password', verifyToken, adminResetPassword);
 
 module.exports = router;
