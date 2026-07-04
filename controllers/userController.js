@@ -543,11 +543,181 @@ const adminResetPassword = async (req, res) => {
   }
 };
 
+// Mark Quick Attendance
+const markAttendance = async (req, res) => {
+  try {
+    const { code } = req.params;
+
+    // Check if user exists
+    const userRef = db.ref(`users/${code}`);
+    const snapshot = await userRef.once('value');
+
+    if (!snapshot.exists()) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Fetch active term from config
+    const configSnapshot = await db.ref('config').once('value');
+    const config = configSnapshot.val();
+    const activeTerm = config?.terms?.current_term || 1;
+
+    // Map term number to degree key: 1 -> firstTerm, 2 -> secondTerm, 3 -> thirdTerm
+    const termKeyMap = { 1: 'firstTerm', 2: 'secondTerm', 3: 'thirdTerm' };
+    const termKey = termKeyMap[activeTerm] || 'firstTerm';
+
+    // Prepare attendance record
+    const now = new Date();
+    // format YYYY-MM-DD HH:mm
+    const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+    const attendanceRecord = {
+      date: dateStr,
+      status: "تم الحضور",
+      term: activeTerm
+    };
+
+    // Add to attendance/{code}
+    const attendanceRef = db.ref(`attendance/${code}`);
+    await attendanceRef.push(attendanceRecord);
+
+    // Count total attendance records for the active term
+    const allAttendanceSnapshot = await attendanceRef.once('value');
+    const allAttendance = allAttendanceSnapshot.val() || {};
+    const termAttendanceCount = Object.values(allAttendance).filter(
+      record => Number(record.term) === Number(activeTerm)
+    ).length;
+
+    // Sync count into users/{code}/degree/{termKey}/attencance
+    // Also recalculate total for that term
+    const degreeRef = db.ref(`users/${code}/degree/${termKey}`);
+    const degreeSnapshot = await degreeRef.once('value');
+    const currentDegree = degreeSnapshot.val() || {};
+
+    const updatedDegree = {
+      ...currentDegree,
+      attencance: termAttendanceCount
+    };
+
+    // Recalculate total
+    const subjects = ['agbya', 'coptic', 'hymns', 'taks', 'attencance'];
+    let total = 0;
+    subjects.forEach(sub => {
+      total += Number(updatedDegree[sub] || 0);
+    });
+    updatedDegree.total = total;
+
+    await degreeRef.update(updatedDegree);
+
+    return res.status(200).json({
+      message: 'Attendance marked successfully',
+      record: attendanceRecord,
+      termAttendanceCount,
+      termKey
+    });
+  } catch (error) {
+    console.error('Error marking attendance:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// Sync ALL users' attendance counts into their degree nodes for all terms
+const syncAllAttendanceDegrees = async (req, res) => {
+  try {
+    const termKeyMap = { 1: 'firstTerm', 2: 'secondTerm', 3: 'thirdTerm' };
+    const subjects = ['agbya', 'coptic', 'hymns', 'taks', 'attencance'];
+
+    // Fetch all attendance data
+    const attendanceSnapshot = await db.ref('attendance').once('value');
+    const allAttendance = attendanceSnapshot.val() || {};
+
+    let updatedCount = 0;
+
+    for (const [code, records] of Object.entries(allAttendance)) {
+      const recordsArr = Object.values(records);
+
+      // Count attendance records per term number
+      const countsByTerm = { 1: 0, 2: 0, 3: 0 };
+      recordsArr.forEach(record => {
+        const t = Number(record.term);
+        if (t >= 1 && t <= 3) {
+          countsByTerm[t] = (countsByTerm[t] || 0) + 1;
+        }
+      });
+
+      // Update each term's degree node
+      for (const [termNum, termKey] of Object.entries(termKeyMap)) {
+        const count = countsByTerm[Number(termNum)] || 0;
+        const degreeRef = db.ref(`users/${code}/degree/${termKey}`);
+        const degreeSnapshot = await degreeRef.once('value');
+        const currentDegree = degreeSnapshot.val() || {};
+
+        const updatedDegree = { ...currentDegree, attencance: count };
+
+        // Recalculate total
+        let total = 0;
+        subjects.forEach(sub => { total += Number(updatedDegree[sub] || 0); });
+        updatedDegree.total = total;
+
+        await degreeRef.update(updatedDegree);
+      }
+      updatedCount++;
+    }
+
+    return res.status(200).json({
+      message: `Synced attendance degrees for ${updatedCount} students successfully.`
+    });
+  } catch (error) {
+    console.error('Error syncing attendance degrees:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// Bulk delete degree data for selected users
+const bulkDeleteDegrees = async (req, res) => {
+  try {
+    const { codes } = req.body; // array of user codes
+
+    if (!Array.isArray(codes) || codes.length === 0) {
+      return res.status(400).json({ message: 'codes must be a non-empty array' });
+    }
+
+    const results = { successful: [], failed: [] };
+
+    for (const code of codes) {
+      try {
+        const userRef = db.ref(`users/${code}`);
+        const snapshot = await userRef.once('value');
+
+        if (!snapshot.exists()) {
+          results.failed.push({ code, error: 'User not found' });
+          continue;
+        }
+
+        // Remove only the degree node, keep everything else
+        await db.ref(`users/${code}/degree`).remove();
+        results.successful.push(code);
+      } catch (err) {
+        results.failed.push({ code, error: err.message });
+      }
+    }
+
+    return res.status(200).json({
+      message: `Bulk delete complete. Deleted: ${results.successful.length}, Failed: ${results.failed.length}`,
+      results
+    });
+  } catch (error) {
+    console.error('Error in bulk delete degrees:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
 module.exports = {
   getAllUsers,
   getpenddingUsers,
   getUserByCode,
   getUsersAttendance,
+  markAttendance,
+  syncAllAttendanceDegrees,
   createUser,
   updateUser,
   deleteUser,

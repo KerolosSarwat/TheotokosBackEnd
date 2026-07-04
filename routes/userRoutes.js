@@ -9,6 +9,8 @@ const {
     deleteUser,
     deletePenddingUser,
     getUsersAttendance,
+    markAttendance,
+    syncAllAttendanceDegrees,
     sendNotification,
     approveUser,
     syncPortalUser,
@@ -27,6 +29,12 @@ router.get('/pendding', getpenddingUsers);
 
 // Get attendance report (must come before /:code)
 router.get('/attendance-report', getUsersAttendance);
+
+// Mark quick attendance
+router.post('/attendance/:code', verifyToken, checkPermission('attendance', 'edit'), markAttendance);
+
+// Sync all attendance counts into degree nodes
+router.post('/attendance-sync', verifyToken, checkPermission('attendance', 'edit'), syncAllAttendanceDegrees);
 
 // Portal User Management (must come before /:code)
 router.get('/portal/users', getPortalUsers);
