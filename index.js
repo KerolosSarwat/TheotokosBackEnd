@@ -5,6 +5,7 @@ const dotenv = require('dotenv');
 // Load environment variables
 dotenv.config();
 
+
 // Validate required environment variables
 const requiredEnv = [
   'FIREBASE_TYPE',
