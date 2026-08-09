@@ -17,7 +17,8 @@ const {
     getPortalUsers,
     updatePortalUser,
     resetPasswordByPhone,
-    adminResetPassword
+    adminResetPassword,
+    bulkDeleteDegrees
 } = require('../controllers/userController');
 const { verifyToken, checkPermission } = require('../middleware/authMiddleware');
 
@@ -51,6 +52,9 @@ router.post('/approve/:code', verifyToken, checkPermission('users', 'edit'), app
 // Update user (Single and Bulk)
 router.put('/:code', verifyToken, checkPermission('users', 'edit'), updateUser);
 router.post('/bulk-update', verifyToken, checkPermission('users', 'edit'), updateUser);
+
+// Bulk delete degree data
+router.post('/bulk-delete-degrees', verifyToken, checkPermission('users', 'delete'), bulkDeleteDegrees);
 
 // Portal User Management
 router.put('/portal/users/:uid', updatePortalUser);

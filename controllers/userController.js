@@ -556,14 +556,21 @@ const markAttendance = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Fetch active term from config
+    // Fetch active term and config
     const configSnapshot = await db.ref('config').once('value');
     const config = configSnapshot.val();
     const activeTerm = config?.terms?.current_term || 1;
 
-    // Map term number to degree key: 1 -> firstTerm, 2 -> secondTerm, 3 -> thirdTerm
+    // Map term number to degree key and config key
     const termKeyMap = { 1: 'firstTerm', 2: 'secondTerm', 3: 'thirdTerm' };
+    const termConfigKeyMap = { 1: 'first_term', 2: 'second_term', 3: 'third_term' };
     const termKey = termKeyMap[activeTerm] || 'firstTerm';
+    const termConfigKey = termConfigKeyMap[activeTerm] || 'first_term';
+
+    // Get attendance degree config: total attendance degree and sessions per term
+    const totalAttendanceDegree = Number(config?.degrees?.attendance) || 0;
+    const sessionsPerTerm = Number(config?.terms?.[termConfigKey]?.week_count) || 1; // default 1 to avoid division by zero
+    const degreePerSession = totalAttendanceDegree / sessionsPerTerm;
 
     // Prepare attendance record
     const now = new Date();
@@ -587,15 +594,21 @@ const markAttendance = async (req, res) => {
       record => Number(record.term) === Number(activeTerm)
     ).length;
 
-    // Sync count into users/{code}/degree/{termKey}/attencance
-    // Also recalculate total for that term
+    // Calculate attendance degree: attended_sessions × degree_per_session
+    // Round to 2 decimal places, then cap at the max attendance degree
+    const calculatedAttendanceDegree = Math.min(
+      Math.round(termAttendanceCount * degreePerSession * 100) / 100,
+      totalAttendanceDegree
+    );
+
+    // Sync into users/{code}/degree/{termKey}/attencance
     const degreeRef = db.ref(`users/${code}/degree/${termKey}`);
     const degreeSnapshot = await degreeRef.once('value');
     const currentDegree = degreeSnapshot.val() || {};
 
     const updatedDegree = {
       ...currentDegree,
-      attencance: termAttendanceCount
+      attencance: calculatedAttendanceDegree
     };
 
     // Recalculate total
@@ -604,7 +617,7 @@ const markAttendance = async (req, res) => {
     subjects.forEach(sub => {
       total += Number(updatedDegree[sub] || 0);
     });
-    updatedDegree.total = total;
+    updatedDegree.total = Math.round(total * 100) / 100;
 
     await degreeRef.update(updatedDegree);
 
@@ -612,6 +625,8 @@ const markAttendance = async (req, res) => {
       message: 'Attendance marked successfully',
       record: attendanceRecord,
       termAttendanceCount,
+      attendanceDegree: calculatedAttendanceDegree,
+      degreePerSession,
       termKey
     });
   } catch (error) {
@@ -624,7 +639,13 @@ const markAttendance = async (req, res) => {
 const syncAllAttendanceDegrees = async (req, res) => {
   try {
     const termKeyMap = { 1: 'firstTerm', 2: 'secondTerm', 3: 'thirdTerm' };
+    const termConfigKeyMap = { 1: 'first_term', 2: 'second_term', 3: 'third_term' };
     const subjects = ['agbya', 'coptic', 'hymns', 'taks', 'attencance'];
+
+    // Fetch config for degree calculation
+    const configSnapshot = await db.ref('config').once('value');
+    const config = configSnapshot.val();
+    const totalAttendanceDegree = Number(config?.degrees?.attendance) || 0;
 
     // Fetch all attendance data
     const attendanceSnapshot = await db.ref('attendance').once('value');
@@ -647,16 +668,29 @@ const syncAllAttendanceDegrees = async (req, res) => {
       // Update each term's degree node
       for (const [termNum, termKey] of Object.entries(termKeyMap)) {
         const count = countsByTerm[Number(termNum)] || 0;
+        const termConfigKey = termConfigKeyMap[Number(termNum)];
+
+        // Calculate degree per session for this term
+        const sessionsPerTerm = Number(config?.terms?.[termConfigKey]?.week_count) || 1;
+        const degreePerSession = totalAttendanceDegree / sessionsPerTerm;
+
+        // Calculate attendance degree: attended_sessions × degree_per_session
+        // Round to 2 decimal places, then cap at the max attendance degree
+        const calculatedAttendanceDegree = Math.min(
+          Math.round(count * degreePerSession * 100) / 100,
+          totalAttendanceDegree
+        );
+
         const degreeRef = db.ref(`users/${code}/degree/${termKey}`);
         const degreeSnapshot = await degreeRef.once('value');
         const currentDegree = degreeSnapshot.val() || {};
 
-        const updatedDegree = { ...currentDegree, attencance: count };
+        const updatedDegree = { ...currentDegree, attencance: calculatedAttendanceDegree };
 
         // Recalculate total
         let total = 0;
         subjects.forEach(sub => { total += Number(updatedDegree[sub] || 0); });
-        updatedDegree.total = total;
+        updatedDegree.total = Math.round(total * 100) / 100;
 
         await degreeRef.update(updatedDegree);
       }
@@ -728,5 +762,6 @@ module.exports = {
   getPortalUsers,
   updatePortalUser,
   resetPasswordByPhone,
-  adminResetPassword
+  adminResetPassword,
+  bulkDeleteDegrees
 };
