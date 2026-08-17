@@ -1,31 +1,66 @@
 // const { use } = require('react');
-const { db, admin, auth } = require('../config/firebase-config');
+const { db, admin, auth, firestore } = require('../config/firebase-config');
+const { invalidateAttendanceCache } = require('../utils/cache');
+const { logAuditEvent } = require('../utils/auditLogger');
 
-// Get all users
+// Get all users (from Firestore)
 const getAllUsers = async (req, res) => {
   try {
-    const usersRef = db.ref('users');
+    const usersSnapshot = await firestore.collection('users').get();
 
-    const snapshot = await usersRef.once('value');
-    const users = snapshot.val();
-    if (!users) {
+    if (usersSnapshot.empty) {
       return res.status(404).json({ message: 'No users found' });
     }
+
+    // Return as object keyed by code (same shape as before for backward compat)
+    const users = {};
+    usersSnapshot.forEach(doc => {
+      const data = doc.data();
+      if (!data.is_deleted) {
+        users[doc.id] = { ...data, code: doc.id };
+      }
+    });
+
     return res.status(200).json(users);
   } catch (error) {
     console.error('Error getting users:', error);
     return res.status(500).json({ error: error.message });
   }
 };
+
+// Get soft-deleted users (from Firestore)
+const getDeletedUsers = async (req, res) => {
+  try {
+    const usersSnapshot = await firestore.collection('users').where('is_deleted', '==', true).get();
+
+    const users = {};
+    if (!usersSnapshot.empty) {
+      usersSnapshot.forEach(doc => {
+        users[doc.id] = { ...doc.data(), code: doc.id };
+      });
+    }
+
+    return res.status(200).json(users);
+  } catch (error) {
+    console.error('Error getting deleted users:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// Get pending users (from Realtime Database)
 const getpenddingUsers = async (req, res) => {
   try {
-    const usersRef = db.ref('penddingUsers');
-    const snapshot = await usersRef.once('value');
-    const users = snapshot.val();
+    const snapshot = await db.ref('penddingUsers').once('value');
+    const data = snapshot.val();
 
-    if (!users) {
+    if (!data) {
       return res.status(404).json({ message: 'No users found' });
     }
+
+    const users = {};
+    Object.keys(data).forEach(key => {
+      users[key] = { ...data[key], code: key };
+    });
 
     return res.status(200).json(users);
   } catch (error) {
@@ -34,25 +69,31 @@ const getpenddingUsers = async (req, res) => {
   }
 };
 
-// Get user by code
+// Get user by code (from Firestore or Realtime DB for pending)
 const getUserByCode = async (req, res) => {
   try {
     const { code } = req.params;
     const { type } = req.query; // Check for type=pending
 
-    let userRef;
     if (type === 'pending') {
-      userRef = db.ref(`penddingUsers/${code}`);
-    } else {
-      userRef = db.ref(`users/${code}`);
+      const snapshot = await db.ref(`penddingUsers/${code}`).once('value');
+      const data = snapshot.val();
+      
+      if (!data) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+      
+      return res.status(200).json({ ...data, code });
     }
 
-    const snapshot = await userRef.once('value');
-    const user = snapshot.val();
+    const docRef = firestore.collection('users').doc(code);
+    const doc = await docRef.get();
 
-    if (!user) {
+    if (!doc.exists) {
       return res.status(404).json({ message: 'User not found' });
     }
+
+    const user = { ...doc.data(), code: doc.id };
 
     return res.status(200).json(user);
   } catch (error) {
@@ -60,36 +101,35 @@ const getUserByCode = async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
 };
+
 // Get combined data: users with their attendance
 const getUsersAttendance = async (req, res) => {
   try {
     const { level } = req.query;
 
-    // const [usersResponse, attendanceResponse] = await Promise.all([
-    //   axios.get(`${FIREBASE_URL}/users.json`),
-    //   axios.get(`${FIREBASE_URL}/attendance.json`)
-    // ]);
-
-    const users = (await db.ref('users').once("value")).val();
+    // Users from Firestore
+    const usersSnapshot = await firestore.collection('users').get();
+    // Attendance from Realtime DB
     const attendance = (await db.ref('attendance').once("value")).val();
-    // Handle case where no data exists
-    if (!users) {
+
+    if (usersSnapshot.empty) {
       return res.json([]);
     }
 
-    let usersArray = Object.keys(users).map(key => {
-      // Create a clean user object without circular references
-      return {
-        id: key,
-        code: users[key].code,
-        fullName: users[key].fullName,
-        level: users[key].level,
-        church: users[key].church,
-        birthdate: users[key].birthdate,
-        gender: users[key].gender,
-        address: users[key].address,
-        phoneNumber: users[key].phoneNumber
-      };
+    let usersArray = [];
+    usersSnapshot.forEach(doc => {
+      const data = doc.data();
+      usersArray.push({
+        id: doc.id,
+        code: doc.id,
+        fullName: data.fullName,
+        level: data.level,
+        church: data.church,
+        birthdate: data.birthdate,
+        gender: data.gender,
+        address: data.address,
+        phoneNumber: data.phoneNumber
+      });
     });
 
     // Filter by level if provided
@@ -136,7 +176,7 @@ const getUsersAttendance = async (req, res) => {
   }
 };
 
-// Create new user
+// Create new user (into users in Firestore)
 const createUser = async (req, res) => {
   try {
     const userData = req.body;
@@ -147,24 +187,34 @@ const createUser = async (req, res) => {
     }
     console.log(userData)
     // Check if user already exists
-    const userRef = db.ref(`penddingUsers/${userData.code}`);
-    const snapshot = await userRef.once('value');
+    const docRef = firestore.collection('users').doc(userData.code);
+    const doc = await docRef.get();
 
-    if (snapshot.exists()) {
+    if (doc.exists) {
       return res.status(409).json({ message: 'User with this code already exists' });
     }
 
-    // Create user with the provided code as the key
-    await userRef.set(userData);
+    // Remove degree from user data — degrees go into academicRecords subcollection
+    const { degree, ...userDataWithoutDegree } = userData;
 
-    return res.status(201).json({ message: 'User created successfully', user: userData });
+    // Create user with the provided code as the document ID
+    await docRef.set(userDataWithoutDegree);
+
+    await logAuditEvent(req, {
+      action: 'CREATE_USER',
+      module: 'users',
+      targetId: userData.code,
+      details: { fullName: userData.fullName, level: userData.level }
+    });
+
+    return res.status(201).json({ message: 'User created successfully', user: userDataWithoutDegree });
   } catch (error) {
     console.error('Error creating user:', error);
     return res.status(500).json({ error: error.message });
   }
 };
 
-// Update user
+// Update user (in Firestore)
 const updateUser = async (req, res) => {
   try {
     const { code } = req.params;
@@ -173,11 +223,6 @@ const updateUser = async (req, res) => {
 
     // BULK UPDATE: If userData is an array
     if (Array.isArray(userData)) {
-      // ... (existing bulk update logic remains same, assuming it's for regular users mainly)
-      // If needed for pending, logic would be similar but target different node.
-      // For now, let's keep bulk update as is or update if necessary.
-      // Assuming bulk update is for main list import.
-
       const results = {
         successful: [],
         failed: []
@@ -190,27 +235,36 @@ const updateUser = async (req, res) => {
             continue;
           }
           console.log(user.code);
-          const userRef = db.ref(`users/${user.code}`);
-          const snapshot = await userRef.once('value');
+          const docRef = firestore.collection('users').doc(user.code);
+          const doc = await docRef.get();
           console.log(user.code);
 
-          if (!snapshot.exists()) {
+          if (!doc.exists) {
             results.failed.push({ user, error: 'User not found' });
             continue;
           }
 
           const { code: userCode, ...updateData } = user;
-          await userRef.update(updateData);
+          // Remove degree from bulk update — degrees are in subcollection
+          const { degree, ...cleanUpdateData } = updateData;
+          await docRef.update(cleanUpdateData);
 
-          const updatedSnapshot = await userRef.once('value');
+          const updatedDoc = await docRef.get();
           results.successful.push({
             code: user.code,
-            user: updatedSnapshot.val()
+            user: updatedDoc.data()
           });
         } catch (error) {
           results.failed.push({ user, error: error.message });
         }
       }
+
+      await logAuditEvent(req, {
+        action: 'BULK_UPDATE_USERS',
+        module: 'users',
+        targetId: null,
+        details: { successCount: results.successful.length, failedCount: results.failed.length }
+      });
 
       return res.status(200).json({
         message: `Bulk update completed. Successful: ${results.successful.length}, Failed: ${results.failed.length}`,
@@ -218,27 +272,56 @@ const updateUser = async (req, res) => {
       });
     }
 
-    // SINGLE UPDATE: Modified logic
-    let userRef;
+    // SINGLE UPDATE
     if (type === 'pending') {
-      userRef = db.ref(`penddingUsers/${code}`);
-    } else {
-      userRef = db.ref(`users/${code}`);
+      const ref = db.ref(`penddingUsers/${code}`);
+      const snapshot = await ref.once('value');
+      
+      if (!snapshot.exists()) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+
+      const { degree, ...cleanUserData } = userData;
+      await ref.update(cleanUserData);
+      
+      const updatedSnapshot = await ref.once('value');
+
+      await logAuditEvent(req, {
+        action: 'UPDATE_USER',
+        module: 'users',
+        targetId: code,
+        details: { updatedFields: Object.keys(cleanUserData) }
+      });
+
+      return res.status(200).json({
+        message: 'User updated successfully',
+        user: updatedSnapshot.val()
+      });
     }
 
-    const snapshot = await userRef.once('value');
+    const docRef = firestore.collection('users').doc(code);
+    const doc = await docRef.get();
 
-    if (!snapshot.exists()) {
+    if (!doc.exists) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    await userRef.update(userData);
+    // Remove degree from updates — degrees go into academicRecords subcollection
+    const { degree, ...cleanUserData } = userData;
+    await docRef.update(cleanUserData);
 
-    const updatedSnapshot = await userRef.once('value');
+    const updatedDoc = await docRef.get();
+
+    await logAuditEvent(req, {
+      action: 'UPDATE_USER',
+      module: 'users',
+      targetId: code,
+      details: { updatedFields: Object.keys(cleanUserData) }
+    });
 
     return res.status(200).json({
       message: 'User updated successfully',
-      user: updatedSnapshot.val()
+      user: updatedDoc.data()
     });
   } catch (error) {
     console.error('Error updating user:', error);
@@ -246,48 +329,222 @@ const updateUser = async (req, res) => {
   }
 };
 
-// Delete user
+// Delete user (Soft Delete)
 const deleteUser = async (req, res) => {
   try {
     const { code } = req.params;
 
     // Check if user exists
-    const userRef = db.ref(`users/${code}`);
-    const snapshot = await userRef.once('value');
+    const docRef = firestore.collection('users').doc(code);
+    const doc = await docRef.get();
 
-    if (!snapshot.exists()) {
+    if (!doc.exists) {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Delete user
-    await userRef.remove();
+    // Perform soft delete
+    await docRef.update({
+      is_deleted: true,
+      deleted_at: new Date().toISOString()
+    });
 
-    return res.status(200).json({ message: 'User deleted successfully' });
+    await logAuditEvent(req, {
+      action: 'SOFT_DELETE_USER',
+      module: 'users',
+      targetId: code,
+      details: { fullName: doc.data().fullName }
+    });
+
+    return res.status(200).json({ message: 'User moved to trash successfully' });
   } catch (error) {
-    console.error('Error deleting user:', error);
+    console.error('Error soft deleting user:', error);
     return res.status(500).json({ error: error.message });
   }
 };
 
-// Delete pending user
+// Permanently delete user (from Firestore, including subcollections)
+const permanentlyDeleteUser = async (req, res) => {
+  try {
+    const { code } = req.params;
+
+    // Check if user exists
+    const docRef = firestore.collection('users').doc(code);
+    const doc = await docRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Delete academicRecords subcollection first
+    const academicRecordsSnapshot = await docRef.collection('academicRecords').get();
+    const batch = firestore.batch();
+    academicRecordsSnapshot.forEach(subDoc => {
+      batch.delete(subDoc.ref);
+    });
+    // Delete the user document itself
+    batch.delete(docRef);
+    await batch.commit();
+
+    await logAuditEvent(req, {
+      action: 'PERMANENT_DELETE_USER',
+      module: 'users',
+      targetId: code,
+      details: { fullName: doc.data().fullName }
+    });
+
+    return res.status(200).json({ message: 'User permanently deleted successfully' });
+  } catch (error) {
+    console.error('Error permanently deleting user:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// Restore user
+const restoreUser = async (req, res) => {
+  try {
+    const { code } = req.params;
+
+    const docRef = firestore.collection('users').doc(code);
+    const doc = await docRef.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    await docRef.update({
+      is_deleted: admin.firestore.FieldValue.delete(),
+      deleted_at: admin.firestore.FieldValue.delete()
+    });
+
+    await logAuditEvent(req, {
+      action: 'RESTORE_USER',
+      module: 'users',
+      targetId: code,
+      details: { fullName: doc.data().fullName }
+    });
+
+    return res.status(200).json({ message: 'User restored successfully' });
+  } catch (error) {
+    console.error('Error restoring user:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// Purge soft-deleted users older than 30 days
+const purgeTrash = async (req, res) => {
+  try {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+    const usersSnapshot = await firestore.collection('users').where('is_deleted', '==', true).get();
+
+    if (usersSnapshot.empty) {
+      return res.status(200).json({ message: 'No deleted users found in trash' });
+    }
+
+    const batch = firestore.batch();
+    let purgedCount = 0;
+
+    for (const doc of usersSnapshot.docs) {
+      const userData = doc.data();
+      const deletedAtStr = userData.deleted_at;
+      
+      if (deletedAtStr) {
+        const deletedAt = new Date(deletedAtStr);
+        if (deletedAt < thirtyDaysAgo) {
+          // Add to batch delete
+          const docRef = doc.ref;
+          
+          // Must delete subcollections first
+          const academicRecordsSnapshot = await docRef.collection('academicRecords').get();
+          academicRecordsSnapshot.forEach(subDoc => {
+            batch.delete(subDoc.ref);
+          });
+
+          batch.delete(docRef);
+          purgedCount++;
+        }
+      }
+    }
+
+    if (purgedCount > 0) {
+      await batch.commit();
+    }
+
+    return res.status(200).json({ message: `Purged ${purgedCount} users from trash` });
+  } catch (error) {
+    console.error('Error purging trash:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// Delete pending user (from Realtime Database)
 const deletePenddingUser = async (req, res) => {
   try {
     const { code } = req.params;
 
-    // Check if user exists in penddingUsers
-    const userRef = db.ref(`penddingUsers/${code}`);
-    const snapshot = await userRef.once('value');
+    // Check if user exists in pendingUsers
+    const ref = db.ref(`penddingUsers/${code}`);
+    const snapshot = await ref.once('value');
 
     if (!snapshot.exists()) {
       return res.status(404).json({ message: 'Pending user not found' });
     }
 
     // Delete user
-    await userRef.remove();
+    await ref.remove();
 
     return res.status(200).json({ message: 'Pending user deleted successfully' });
   } catch (error) {
     console.error('Error deleting pending user:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+const bulkDeleteUsers = async (req, res) => {
+  try {
+    const { userIds } = req.body;
+    if (!userIds || !Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({ message: 'Missing or invalid userIds array' });
+    }
+
+    const batches = [];
+    let currentBatch = firestore.batch();
+    let currentBatchSize = 0;
+
+    const deletedAt = new Date().toISOString();
+
+    for (const code of userIds) {
+      const userRef = firestore.collection('users').doc(code);
+      currentBatch.update(userRef, { 
+        is_deleted: true,
+        deleted_at: deletedAt
+      });
+      currentBatchSize++;
+
+      if (currentBatchSize === 500) {
+        batches.push(currentBatch.commit());
+        currentBatch = firestore.batch();
+        currentBatchSize = 0;
+      }
+    }
+
+    if (currentBatchSize > 0) {
+      batches.push(currentBatch.commit());
+    }
+
+    await Promise.all(batches);
+
+    await logAuditEvent(req, {
+      action: 'BULK_SOFT_DELETE_USERS',
+      module: 'users',
+      targetId: null,
+      details: { count: userIds.length, userIds }
+    });
+
+    return res.status(200).json({ message: `Successfully soft-deleted ${userIds.length} users` });
+  } catch (error) {
+    console.error('Error bulk deleting users:', error);
     return res.status(500).json({ error: error.message });
   }
 };
@@ -315,37 +572,37 @@ const sendNotification = async (req, res) => {
   }
 };
 
-// Approve user: Move from penddingUsers to users
+// Approve user: Move from RTDB penddingUsers to Firestore users
 const approveUser = async (req, res) => {
   try {
     const { code } = req.params;
 
-    // 1. Get user from penddingUsers
-    const pendingUserRef = db.ref(`penddingUsers/${code}`);
-    const snapshot = await pendingUserRef.once('value');
-    const userData = snapshot.val();
+    // 1. Get user from RTDB penddingUsers
+    const pendingRef = db.ref(`penddingUsers/${code}`);
+    const pendingSnapshot = await pendingRef.once('value');
 
-    if (!userData) {
+    if (!pendingSnapshot.exists()) {
       return res.status(404).json({ message: 'Pending user not found' });
     }
 
-    // 2. Check if user already exists in main users list to avoid overwrite/duplication issues
-    const userRef = db.ref(`users/${code}`);
-    const existingUserSnapshot = await userRef.once('value');
+    const userData = pendingSnapshot.val();
 
-    if (existingUserSnapshot.exists()) {
-      // Optional: Decide whether to merge, error, or overwrite. 
-      // For now, we'll error to be safe, or we could overwrite.
-      // Let's overwrite / update since approval might be a "fix" for an existing record too,
-      // but typically "pending" implies a new signup.
-      // Let's assume we proceed.
-    }
+    // 2. Add to users collection in Firestore
+    const userDocRef = firestore.collection('users').doc(code);
+    await userDocRef.set({
+      ...userData,
+      code: code
+    });
+    
+    // 3. Remove from RTDB
+    await pendingRef.remove();
 
-    // 3. Save to users node
-    await userRef.set(userData);
-
-    // 4. Remove from penddingUsers node
-    await pendingUserRef.remove();
+    await logAuditEvent(req, {
+      action: 'APPROVE_USER',
+      module: 'users',
+      targetId: code,
+      details: { fullName: userData.fullName }
+    });
 
     return res.status(200).json({ message: 'User approved successfully', user: userData });
   } catch (error) {
@@ -354,7 +611,7 @@ const approveUser = async (req, res) => {
   }
 };
 
-// Sync Portal User (called on login/register)
+// Sync Portal User (called on login/register) — stays in Realtime DB
 const syncPortalUser = async (req, res) => {
   try {
     const { uid, email, displayName, photoURL } = req.body;
@@ -400,7 +657,7 @@ const syncPortalUser = async (req, res) => {
   }
 };
 
-// Get all Portal Users
+// Get all Portal Users — stays in Realtime DB
 const getPortalUsers = async (req, res) => {
   try {
     const usersRef = db.ref('portalUsers');
@@ -420,7 +677,7 @@ const getPortalUsers = async (req, res) => {
   }
 };
 
-// Update Portal User Permissions/Role
+// Update Portal User Permissions/Role — stays in Realtime DB
 const updatePortalUser = async (req, res) => {
   try {
     const { uid } = req.params;
@@ -441,6 +698,14 @@ const updatePortalUser = async (req, res) => {
 
     // Return updated user
     const updatedUser = (await userRef.once('value')).val();
+
+    await logAuditEvent(req, {
+      action: 'UPDATE_PORTAL_USER_PERMISSIONS',
+      module: 'portal_users',
+      targetId: uid,
+      details: { updatedRole: role || null, updatedPermissions: permissions || null }
+    });
+
     return res.status(200).json({ message: 'Portal user updated', user: updatedUser });
   } catch (error) {
     console.error('Error updating portal user:', error);
@@ -533,6 +798,13 @@ const adminResetPassword = async (req, res) => {
     // Just update the target user's password
     await admin.auth().updateUser(targetUid, { password: newPassword });
 
+    await logAuditEvent(req, {
+      action: 'ADMIN_RESET_PASSWORD',
+      module: 'portal_users',
+      targetId: targetUid,
+      details: null
+    });
+
     return res.status(200).json({ message: 'Password reset successfully' });
   } catch (error) {
     console.error('Error resetting staff password:', error);
@@ -543,23 +815,31 @@ const adminResetPassword = async (req, res) => {
   }
 };
 
-// Mark Quick Attendance
+// Helper: Get current academic year from config
+const getCurrentAcademicYear = async () => {
+  const configSnapshot = await db.ref('config/academicYear').once('value');
+  return configSnapshot.val() || `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`;
+};
+
+// Mark Quick Attendance (writes to Firestore subcollection)
 const markAttendance = async (req, res) => {
   try {
     const { code } = req.params;
 
-    // Check if user exists
-    const userRef = db.ref(`users/${code}`);
-    const snapshot = await userRef.once('value');
+    // Check if user exists in Firestore
+    const userDoc = await firestore.collection('users').doc(code).get();
 
-    if (!snapshot.exists()) {
+    if (!userDoc.exists) {
       return res.status(404).json({ message: 'User not found' });
     }
+    
+    const userData = userDoc.data();
 
-    // Fetch active term and config
+    // Fetch active term and config from Realtime DB
     const configSnapshot = await db.ref('config').once('value');
     const config = configSnapshot.val();
     const activeTerm = config?.terms?.current_term || 1;
+    const academicYear = config?.academicYear || `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`;
 
     // Map term number to degree key and config key
     const termKeyMap = { 1: 'firstTerm', 2: 'secondTerm', 3: 'thirdTerm' };
@@ -580,19 +860,25 @@ const markAttendance = async (req, res) => {
     const attendanceRecord = {
       date: dateStr,
       status: "تم الحضور",
-      term: activeTerm
+      term: activeTerm,
+      academicYear: academicYear,
+      // Denormalized fields to allow efficient filtering without reading all user documents
+      code: userData.code || code,
+      fullName: userData.fullName || '',
+      level: userData.level || ''
     };
 
-    // Add to attendance/{code}
-    const attendanceRef = db.ref(`attendance/${code}`);
-    await attendanceRef.push(attendanceRecord);
+    // Add to Firestore subcollection: users/{code}/attendance/{auto-id}
+    const attendanceRef = firestore.collection('users').doc(code).collection('attendance');
+    await attendanceRef.add(attendanceRecord);
 
-    // Count total attendance records for the active term
-    const allAttendanceSnapshot = await attendanceRef.once('value');
-    const allAttendance = allAttendanceSnapshot.val() || {};
-    const termAttendanceCount = Object.values(allAttendance).filter(
-      record => Number(record.term) === Number(activeTerm)
-    ).length;
+    // Count total attendance records for the active term from Firestore subcollection using count() to save reads
+    const termAttendanceQuery = attendanceRef
+      .where('term', '==', activeTerm)
+      .where('academicYear', '==', academicYear);
+      
+    const countSnapshot = await termAttendanceQuery.count().get();
+    const termAttendanceCount = countSnapshot.data().count;
 
     // Calculate attendance degree: attended_sessions × degree_per_session
     // Round to 2 decimal places, then cap at the max attendance degree
@@ -601,13 +887,17 @@ const markAttendance = async (req, res) => {
       totalAttendanceDegree
     );
 
-    // Sync into users/{code}/degree/{termKey}/attencance
-    const degreeRef = db.ref(`users/${code}/degree/${termKey}`);
-    const degreeSnapshot = await degreeRef.once('value');
-    const currentDegree = degreeSnapshot.val() || {};
+    // Sync into Firestore: users/{code}/academicRecords/{academicYear}
+    const academicRecordRef = firestore
+      .collection('users').doc(code)
+      .collection('academicRecords').doc(academicYear);
 
-    const updatedDegree = {
-      ...currentDegree,
+    const academicRecordDoc = await academicRecordRef.get();
+    const currentRecord = academicRecordDoc.exists ? academicRecordDoc.data() : {};
+    const currentTermData = currentRecord[termKey] || {};
+
+    const updatedTermData = {
+      ...currentTermData,
       attencance: calculatedAttendanceDegree
     };
 
@@ -615,11 +905,26 @@ const markAttendance = async (req, res) => {
     const subjects = ['agbya', 'coptic', 'hymns', 'taks', 'attencance'];
     let total = 0;
     subjects.forEach(sub => {
-      total += Number(updatedDegree[sub] || 0);
+      total += Number(updatedTermData[sub] || 0);
     });
-    updatedDegree.total = Math.round(total * 100) / 100;
+    updatedTermData.total = Math.round(total * 100) / 100;
 
-    await degreeRef.update(updatedDegree);
+    await academicRecordRef.set({
+      ...currentRecord,
+      academicYear: academicYear,
+      level: userData.level || '',
+      [termKey]: updatedTermData
+    }, { merge: true });
+
+    // Invalidate attendance cache so reports reflect new data
+    invalidateAttendanceCache();
+
+    await logAuditEvent(req, {
+      action: 'MARK_ATTENDANCE',
+      module: 'attendance',
+      targetId: code,
+      details: { fullName: userData.fullName, date: attendanceRecord.date, term: activeTerm }
+    });
 
     return res.status(200).json({
       message: 'Attendance marked successfully',
@@ -635,7 +940,7 @@ const markAttendance = async (req, res) => {
   }
 };
 
-// Sync ALL users' attendance counts into their degree nodes for all terms
+// Sync ALL users' attendance counts into their academic records for all terms
 const syncAllAttendanceDegrees = async (req, res) => {
   try {
     const termKeyMap = { 1: 'firstTerm', 2: 'secondTerm', 3: 'thirdTerm' };
@@ -646,8 +951,9 @@ const syncAllAttendanceDegrees = async (req, res) => {
     const configSnapshot = await db.ref('config').once('value');
     const config = configSnapshot.val();
     const totalAttendanceDegree = Number(config?.degrees?.attendance) || 0;
+    const academicYear = config?.academicYear || `${new Date().getFullYear()}-${new Date().getFullYear() + 1}`;
 
-    // Fetch all attendance data
+    // Fetch all attendance data from Realtime DB
     const attendanceSnapshot = await db.ref('attendance').once('value');
     const allAttendance = attendanceSnapshot.val() || {};
 
@@ -665,7 +971,21 @@ const syncAllAttendanceDegrees = async (req, res) => {
         }
       });
 
-      // Update each term's degree node
+      // Get the academic record from Firestore
+      const academicRecordRef = firestore
+        .collection('users').doc(code)
+        .collection('academicRecords').doc(academicYear);
+
+      const academicRecordDoc = await academicRecordRef.get();
+      const currentRecord = academicRecordDoc.exists ? academicRecordDoc.data() : {};
+
+      // Get user level
+      const userDoc = await firestore.collection('users').doc(code).get();
+      const userLevel = userDoc.exists ? userDoc.data().level || '' : '';
+
+      // Update each term's degree data
+      const updatedRecord = { ...currentRecord, academicYear, level: userLevel };
+
       for (const [termNum, termKey] of Object.entries(termKeyMap)) {
         const count = countsByTerm[Number(termNum)] || 0;
         const termConfigKey = termConfigKeyMap[Number(termNum)];
@@ -674,26 +994,24 @@ const syncAllAttendanceDegrees = async (req, res) => {
         const sessionsPerTerm = Number(config?.terms?.[termConfigKey]?.week_count) || 1;
         const degreePerSession = totalAttendanceDegree / sessionsPerTerm;
 
-        // Calculate attendance degree: attended_sessions × degree_per_session
-        // Round to 2 decimal places, then cap at the max attendance degree
+        // Calculate attendance degree
         const calculatedAttendanceDegree = Math.min(
           Math.round(count * degreePerSession * 100) / 100,
           totalAttendanceDegree
         );
 
-        const degreeRef = db.ref(`users/${code}/degree/${termKey}`);
-        const degreeSnapshot = await degreeRef.once('value');
-        const currentDegree = degreeSnapshot.val() || {};
-
-        const updatedDegree = { ...currentDegree, attencance: calculatedAttendanceDegree };
+        const currentTermData = currentRecord[termKey] || {};
+        const updatedTermData = { ...currentTermData, attencance: calculatedAttendanceDegree };
 
         // Recalculate total
         let total = 0;
-        subjects.forEach(sub => { total += Number(updatedDegree[sub] || 0); });
-        updatedDegree.total = Math.round(total * 100) / 100;
+        subjects.forEach(sub => { total += Number(updatedTermData[sub] || 0); });
+        updatedTermData.total = Math.round(total * 100) / 100;
 
-        await degreeRef.update(updatedDegree);
+        updatedRecord[termKey] = updatedTermData;
       }
+
+      await academicRecordRef.set(updatedRecord, { merge: true });
       updatedCount++;
     }
 
@@ -709,7 +1027,7 @@ const syncAllAttendanceDegrees = async (req, res) => {
 // Bulk delete degree data for selected users
 const bulkDeleteDegrees = async (req, res) => {
   try {
-    const { codes } = req.body; // array of user codes
+    const { codes, academicYear } = req.body; // array of user codes + optional academic year
 
     if (!Array.isArray(codes) || codes.length === 0) {
       return res.status(400).json({ message: 'codes must be a non-empty array' });
@@ -719,16 +1037,26 @@ const bulkDeleteDegrees = async (req, res) => {
 
     for (const code of codes) {
       try {
-        const userRef = db.ref(`users/${code}`);
-        const snapshot = await userRef.once('value');
+        const userDocRef = firestore.collection('users').doc(code);
+        const userDoc = await userDocRef.get();
 
-        if (!snapshot.exists()) {
+        if (!userDoc.exists) {
           results.failed.push({ code, error: 'User not found' });
           continue;
         }
 
-        // Remove only the degree node, keep everything else
-        await db.ref(`users/${code}/degree`).remove();
+        if (academicYear) {
+          // Delete specific academic year record
+          await userDocRef.collection('academicRecords').doc(academicYear).delete();
+        } else {
+          // Delete all academic records
+          const academicRecordsSnapshot = await userDocRef.collection('academicRecords').get();
+          const batch = firestore.batch();
+          academicRecordsSnapshot.forEach(doc => {
+            batch.delete(doc.ref);
+          });
+          await batch.commit();
+        }
         results.successful.push(code);
       } catch (err) {
         results.failed.push({ code, error: err.message });
@@ -741,6 +1069,102 @@ const bulkDeleteDegrees = async (req, res) => {
     });
   } catch (error) {
     console.error('Error in bulk delete degrees:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// ==========================================
+// Academic Records — Subcollection Endpoints
+// ==========================================
+
+// Get all academic records for a user
+const getAcademicRecords = async (req, res) => {
+  try {
+    const { code } = req.params;
+
+    const userDoc = await firestore.collection('users').doc(code).get();
+    if (!userDoc.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const snapshot = await firestore
+      .collection('users').doc(code)
+      .collection('academicRecords')
+      .orderBy('academicYear', 'desc')
+      .get();
+
+    const records = [];
+    snapshot.forEach(doc => {
+      records.push({ id: doc.id, ...doc.data() });
+    });
+
+    return res.status(200).json(records);
+  } catch (error) {
+    console.error('Error getting academic records:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// Get a specific academic record for a user
+const getAcademicRecord = async (req, res) => {
+  try {
+    const { code, year } = req.params;
+
+    const docRef = firestore
+      .collection('users').doc(code)
+      .collection('academicRecords').doc(year);
+
+    const doc = await docRef.get();
+
+    if (!doc.exists) {
+      // Return empty default record instead of 404 so the frontend can work with it
+      return res.status(200).json({
+        academicYear: year,
+        level: '',
+        firstTerm: { agbya: 0, coptic: 0, hymns: 0, taks: 0, attencance: 0, total: 0 },
+        secondTerm: { agbya: 0, coptic: 0, hymns: 0, taks: 0, attencance: 0, total: 0 },
+        thirdTerm: { agbya: 0, coptic: 0, hymns: 0, taks: 0, attencance: 0, total: 0 }
+      });
+    }
+
+    return res.status(200).json({ id: doc.id, ...doc.data() });
+  } catch (error) {
+    console.error('Error getting academic record:', error);
+    return res.status(500).json({ error: error.message });
+  }
+};
+
+// Update (or create) a specific academic record for a user
+const updateAcademicRecord = async (req, res) => {
+  try {
+    const { code, year } = req.params;
+    const data = req.body;
+
+    // Check user exists
+    const userDoc = await firestore.collection('users').doc(code).get();
+    if (!userDoc.exists) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const docRef = firestore
+      .collection('users').doc(code)
+      .collection('academicRecords').doc(year);
+
+    // Set with merge to preserve existing fields
+    await docRef.set({
+      ...data,
+      academicYear: year,
+      level: data.level || userDoc.data().level || ''
+    }, { merge: true });
+
+    const updatedDoc = await docRef.get();
+
+    return res.status(200).json({
+      message: 'Academic record updated successfully',
+      record: { id: updatedDoc.id, ...updatedDoc.data() }
+    });
+  } catch (error) {
+    console.error('Error updating academic record:', error);
     return res.status(500).json({ error: error.message });
   }
 };
@@ -763,5 +1187,13 @@ module.exports = {
   updatePortalUser,
   resetPasswordByPhone,
   adminResetPassword,
-  bulkDeleteDegrees
+  bulkDeleteDegrees,
+  getAcademicRecords,
+  getAcademicRecord,
+  updateAcademicRecord,
+  getDeletedUsers,
+  restoreUser,
+  permanentlyDeleteUser,
+  purgeTrash,
+  bulkDeleteUsers
 };

@@ -24,6 +24,8 @@ if (missingEnv.length > 0) {
 const userRoutes = require('./routes/userRoutes');
 const firestoreRoutes = require('./routes/firestoreRoutes');
 const configRoutes = require('./routes/configRoutes');
+const attendanceRoutes = require('./routes/attendanceRoutes');
+const auditRoutes = require('./routes/auditRoutes');
 
 // Initialize express app
 const app = express();
@@ -37,6 +39,8 @@ app.use(express.urlencoded({ extended: true }));
 app.use('/api/users', userRoutes);
 app.use('/api/firestore', firestoreRoutes);
 app.use('/api/config', configRoutes);
+app.use('/api/attendance', attendanceRoutes);
+app.use('/api/audit', auditRoutes);
 
 // Root route
 app.get('/', (req, res) => {
